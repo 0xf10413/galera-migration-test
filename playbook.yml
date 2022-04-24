@@ -1,0 +1,84 @@
+- name: Setup basic hosts
+  hosts: all
+  become: true
+
+  handlers:
+    - name: Restart apache
+      ansible.builtin.service:
+        name: apache2
+        state: reloaded
+
+  tasks:
+    - name: Install apache + php + mysql
+      ansible.builtin.package:
+        update_cache: true
+        name:
+          - libapache2-mod-php
+          - php-mysql
+          - apache2
+          - mariadb-server
+          - mariadb-client
+          - python3-pymysql
+        state: present
+
+    # - name: Enable php pdo mysql (uncomment)
+    #   become: true
+    #   lineinfile:
+    #     dest: /etc/php/7.3/apache2/php.ini
+    #     regexp: "extension=pdo_mysql"
+    #     line: "extension=pdo_mysql"
+
+    - name: Enable apache and mysql
+      ansible.builtin.service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - apache2
+        - mariadb
+
+    - name: Create a new database
+      community.mysql.mysql_db:
+        name: my_app
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Create a new user
+      community.mysql.mysql_user:
+        name: my_app
+        host: "%"
+        password: my_app
+        priv: "my_app.*:ALL"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Create applicative table
+      community.mysql.mysql_query:
+        login_db: my_app
+        query: CREATE TABLE IF NOT EXISTS my_table (id INT AUTO_INCREMENT PRIMARY KEY, title VARCHAR(255) NOT NULL)
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Remove default apache website
+      ansible.builtin.file:
+        path: /etc/apache2/sites-enabled/000-default.conf
+        state: absent
+
+    - name: Install my_app (apache)
+      ansible.builtin.copy:
+        src: my_app.conf
+        dest: /etc/apache2/sites-enabled/
+      notify:
+        - Restart apache
+
+    - name: Create my_app folder
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: www-data
+        group: www-data
+      loop:
+        - /srv/my_app
+        - /srv/my_app/uploads
+
+    - name: Install my_app (php)
+      ansible.builtin.copy:
+        src: index.php
+        dest: /srv/my_app/
