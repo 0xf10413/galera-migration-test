@@ -1,5 +1,7 @@
 <?php
 
+# TODO: handle uploads, somehow
+
 $servername = "/var/run/mysqld/mysqld.sock";
 $username = "my_app";
 $password = "my_app";

@@ -1,0 +1,101 @@
+- name: Common configuration
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Ensure no other version of docker is running
+      ansible.builtin.package:
+        name:
+          - docker
+          - docker-engine
+          - docker.io
+          - containerd
+          - runc
+        state: absent
+
+    - name: Install extra tools
+      ansible.builtin.package:
+        name: gpg
+        state: present
+
+    - name: Add docker CE key
+      apt_key:
+        url: https://download.docker.com/linux/debian/gpg
+        state: present
+
+    - name: Add docker CE repository
+      apt_repository:
+        repo: deb https://download.docker.com/linux/debian buster stable
+        state: present
+
+    - name: Install docker and client libs
+      package:
+        name:
+          - docker-ce
+          - python3-docker
+        state: present
+
+    # TODO: might need to add a proxy,
+    # dockerhub became quite stingy with their pull rates
+    - name: Pre-pull symmetricds image
+      community.docker.docker_image:
+        name: jumpmind/symmetricds:3.13.4
+        source: pull
+
+    - name: Create symmetricds configuration folder
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - /srv/symmetricds
+        - /srv/symmetricds/engines
+        - /srv/symmetricds/patches
+
+    - name: Create symmetric db
+      community.mysql.mysql_db:
+        name: symmetric
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Create symmetric user
+      community.mysql.mysql_user:
+        name: symmetric
+        host: "%"
+        password: symmetric # TODO: this should be in a vault
+        # TODO: probably more privileges needed
+        # https://www.symmetricds.org/doc/3.5/html/databases.html
+        priv: "symmetric.*:ALL"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    # TODO: probably some kind of restart needed if it changes.
+    # Unless it can reload dynamically?
+    - name: Install symmetricds configuration
+      ansible.builtin.copy:
+        src: "{{ inventory_hostname }}.properties"
+        dest: /srv/symmetricds/engines
+
+    - name: Install patches for symmetricds (unix socket handling)
+      ansible.builtin.get_url:
+        url: "https://repo1.maven.org/maven2/com/kohlschutter/junixsocket/{{ item }}/2.4.0/{{ item }}-2.4.0.jar"
+        dest: "/srv/symmetricds/patches/{{ item }}-2.4.0.jar"
+      loop:
+        - junixsocket-native-common
+        - junixsocket-common
+        - junixsocket-mysql
+
+    # Needs to be done at the end, startup will do a lot of things
+    - name: Create symmetricds container
+      community.docker.docker_container:
+        name: symmetricds
+        image: jumpmind/symmetricds:3.13.4
+        exposed_ports:
+          - 31415
+        mounts:
+          - type: bind
+            source: /var/run/mysqld/
+            target: /var/run/mysqld/
+          - type: bind
+            source: /srv/symmetricds/engines
+            target: /opt/symmetric-ds/engines
+          - type: bind
+            source: /srv/symmetricds/patches
+            target: /opt/symmetric-ds/patches
