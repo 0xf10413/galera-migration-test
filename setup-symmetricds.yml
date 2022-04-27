@@ -63,7 +63,11 @@
         password: symmetric # TODO: this should be in a vault
         # TODO: probably more privileges needed
         # https://www.symmetricds.org/doc/3.5/html/databases.html
-        priv: "symmetric.*:ALL"
+        priv:
+          "symmetric.*": "ALL"
+          "*.*": "TRIGGER,CREATE ROUTINE"
+          # Tables to be duplicated
+          "my_app.*": "SELECT,INSERT,UPDATE,DELETE"
         login_unix_socket: /var/run/mysqld/mysqld.sock
 
     # TODO: probably some kind of restart needed if it changes.
@@ -87,8 +91,8 @@
       community.docker.docker_container:
         name: symmetricds
         image: jumpmind/symmetricds:3.13.4
-        exposed_ports:
-          - 31415
+        published_ports:
+          - "31415:31415"
         mounts:
           - type: bind
             source: /var/run/mysqld/
@@ -99,3 +103,53 @@
           - type: bind
             source: /srv/symmetricds/patches
             target: /opt/symmetric-ds/patches
+
+- name: Configure server
+  hosts: server1
+  become: true
+
+  handlers:
+    - name: Restart symmetric container
+      community.docker.docker_container:
+        name: symmetricds
+        restart: yes
+
+  tasks:
+    - name: Wait for node readiness
+      community.mysql.mysql_query:
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        login_db: symmetric
+        query: select node_id from sym_node_host where node_id = '000'
+      register: result
+      until: result.rowcount is defined and result.rowcount == [1]
+      retries: 10
+      delay: 3
+
+    - name: Create symmetricds db configuration
+      community.mysql.mysql_query:
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        login_db: symmetric
+        query:
+          # Groups
+          # TODO: is it necessary...?
+          - INSERT IGNORE INTO sym_node_group (node_group_id) VALUES ('master')
+          - INSERT IGNORE INTO sym_node_group (node_group_id) VALUES ('slave')
+          # Groups links
+          # master pushes changes into slave, slave waits for master's changes
+          - INSERT IGNORE INTO sym_node_group_link (source_node_group_id, target_node_group_id, data_event_action) VALUES ('master', 'slave', 'P')
+          - INSERT IGNORE INTO sym_node_group_link (source_node_group_id, target_node_group_id, data_event_action) VALUES ('slave', 'master', 'W')
+          # Routers
+          - INSERT IGNORE INTO sym_router (router_id, source_node_group_id, target_node_group_id, create_time, last_update_time) VALUES ('master-2-slave','master', 'slave', current_timestamp, current_timestamp)
+          # Channels
+          - INSERT IGNORE INTO sym_channel (channel_id, processing_order, max_batch_size, enabled) values('master-2-slave', 1, 100000, 1);
+          # Triggers
+          - INSERT IGNORE INTO sym_trigger (trigger_id, source_catalog_name, source_table_name, channel_id, last_update_time, create_time) values ('all', 'my_app', '*', 'master-2-slave', current_timestamp, current_timestamp)
+          # Triggers routers
+          - INSERT IGNORE INTO sym_trigger_router (trigger_id, router_id, last_update_time, create_time) VALUES ('all','master-2-slave', current_timestamp, current_timestamp);
+      notify: Restart symmetric container
+
+    - name: Request full DB sync
+      community.mysql.mysql_query:
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        login_db: symmetric
+        query: INSERT INTO sym_table_reload_request (target_node_id, source_node_id, trigger_id, router_id, create_time, last_update_time) VALUES ('001', '000', 'all', 'master-2-slave', current_timestamp, current_timestamp);
